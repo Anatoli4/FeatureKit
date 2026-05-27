@@ -26,12 +26,44 @@ open class BaseFeature<ViewStateType: ViewState, Action>: ObservableObject {
 
     /// Runs a one-shot async side effect on the main actor. The task is cancelled when the feature is deallocated.
     @discardableResult
-    public func run(
+    public func runOnMain(
         priority: TaskPriority? = nil,
         operation: @escaping @MainActor () async -> Void
     ) -> Task<Void, Never> {
         let task = Task(priority: priority) { @MainActor in
             await operation()
+        }
+        store(task)
+        return task
+    }
+
+    /// Runs a one-shot async side effect off the main actor, then calls `onMain` on the main actor.
+    /// The task is cancelled when the feature is deallocated.
+    @discardableResult
+    public func run(
+        priority: TaskPriority? = nil,
+        operation: @escaping @Sendable () async -> Void,
+        onMain: @escaping @MainActor () -> Void
+    ) -> Task<Void, Never> {
+        let task = Task.detached(priority: priority) {
+            await operation()
+            await onMain()
+        }
+        store(task)
+        return task
+    }
+
+    /// Runs a one-shot async side effect off the main actor, then delivers the result on the main actor.
+    /// The task is cancelled when the feature is deallocated.
+    @discardableResult
+    public func run<T: Sendable>(
+        priority: TaskPriority? = nil,
+        operation: @escaping @Sendable () async -> T,
+        onResult: @escaping @MainActor (T) -> Void
+    ) -> Task<Void, Never> {
+        let task = Task.detached(priority: priority) {
+            let value = await operation()
+            await onResult(value)
         }
         store(task)
         return task

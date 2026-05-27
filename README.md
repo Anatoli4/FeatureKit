@@ -106,16 +106,21 @@ final class SplashFeature: BaseFeature<SplashViewState, SplashAction> {
     func onAppear() {
         send(with: .setLoading(true))
 
-        run { [weak self] in
-            guard let self else { return }
-            do {
-                try await configService.load()
-                router.routeToMain()
-            } catch {
-                send(with: .setError(error.localizedDescription))
+        run(
+            operation: { [configService] () async -> Result<Void, Error> in
+                Result { try await configService.load() }
+            },
+            onResult: { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .success:
+                    router.routeToMain()
+                case .failure(let error):
+                    send(with: .setError(error.localizedDescription))
+                }
+                send(with: .setLoading(false))
             }
-            send(with: .setLoading(false))
-        }
+        )
     }
 }
 ```
@@ -169,15 +174,25 @@ send(with: .setLoading(false))  // prefer updating state only via send
 
 ## Async API
 
-### `run` — one-shot side effect
+### `run` / `runOnMain` — one-shot side effects
+
+Background work with main-actor completion (network, disk, heavy logic):
 
 ```swift
-run(priority: .userInitiated) { [weak self] in
+run(priority: .userInitiated, operation: { try await api.fetch() }) { [weak self] items in
+    self?.send(with: .loaded(items))
+}
+```
+
+Side effects that should stay on the main actor (navigation, quick UI work):
+
+```swift
+runOnMain(priority: .userInitiated) { [weak self] in
     await self?.purchase()
 }
 ```
 
-The task is cancelled when the feature is deallocated.
+Both tasks are cancelled when the feature is deallocated.
 
 ### `observe` — event stream → actions
 
@@ -232,7 +247,7 @@ cancelAllObservations()
 
 | Before | After |
 |--------|-------|
-| `.sink { }.store(in: &cancellables)` | `observe(stream:)` / `run { }` |
+| `.sink { }.store(in: &cancellables)` | `observe(stream:)` / `run` / `runOnMain` |
 | `public var cancellables` | not needed |
 | `send(on: publisher)` | `observe(stream:)` or `observe(sequence:)` |
 | `CurrentValueSubject` in services | `AsyncStream` + `yield` |
@@ -257,7 +272,9 @@ Remove `import Combine` from features; keep it in services only while migrating.
 |--------|-------------|
 | `send(with:)` | Apply an `Action` through `reduceState` |
 | `reduceState(with:)` | Override in subclass |
-| `run(priority:operation:)` | Main-actor `Task` |
+| `run(priority:operation:onMain:)` | Background `Task`, completion on `@MainActor` |
+| `run(priority:operation:onResult:)` | Background `Task`, result delivered on `@MainActor` |
+| `runOnMain(priority:operation:)` | Main-actor `Task` |
 | `observe(id:stream:)` | `AsyncStream<Action>` |
 | `observe(id:stream:action:)` | `AsyncStream<T>` → `Action` |
 | `observe(id:sequence:action:)` | Any `AsyncSequence` |
