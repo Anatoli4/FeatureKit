@@ -59,9 +59,16 @@ View  ──onAppear / tap──▶  Feature.send(Action)
 | `Action` | Events: taps, API results, timers |
 | `BaseFeature` | Holds store, runs reducer, manages async subscriptions |
 
-`@ViewStateStore` generates `<Name>Store` with `@Published` per field and a diffing `apply(_:)`, so unchanged fields are not republished.
+`@ViewStateStore` generates a single `<Name>Store` facade. Under the hood it picks the right backend at runtime:
 
-**Combine** is only used for `@Published` (SwiftUI on iOS 15–16). Feature logic uses **`async/await`** — no `sink` / `cancellables` in features.
+| OS | Backend | Mechanism |
+|----|---------|-----------|
+| iOS 15–16 / macOS 12–13 | `*StoreLegacy` | `ObservableObject` + `@Published` |
+| iOS 17+ / macOS 14+ | `*StoreModern` | `@Observable` |
+
+You only use `SplashViewStateStore` — legacy/modern types are `fileprivate`.
+
+**Combine** is only used for `@Published` on the legacy path and for `BaseFeature`. Feature logic uses **`async/await`** — no `sink` / `cancellables` in features.
 
 ---
 
@@ -84,7 +91,7 @@ enum SplashAction {
 }
 ```
 
-`@ViewStateStore` expands to `SplashViewStateStore` — an `ObservableObject` with `isLoading`, `errorMessage`, `snapshot`, and `apply(_:)`.
+`@ViewStateStore` expands to `SplashViewStateStore` — a facade over a platform-specific store with `isLoading`, `errorMessage`, `snapshot`, and `apply(_:)`.
 
 ### Feature
 
@@ -140,12 +147,12 @@ final class SplashFeature: BaseFeature<SplashViewStateStore, SplashAction> {
 import SwiftUI
 
 struct SplashView: View {
-    @StateObject private var feature: SplashFeature
+    @FeatureState private var feature: SplashFeature
 
     private var state: SplashViewStateStore { feature.viewState }
 
     init(feature: SplashFeature) {
-        _feature = StateObject(wrappedValue: feature)
+        _feature = FeatureState(wrappedValue: feature)
     }
 
     var body: some View {
@@ -162,11 +169,7 @@ struct SplashView: View {
 }
 ```
 
-For heavier subviews, pass only the fields they need:
-
-```swift
-LoadingView(isLoading: state.isLoading)
-```
+`@FeatureState` wraps `@StateObject` today. On iOS 17+ apps you can also hold the feature with `@State` when using `@Observable` stores directly.
 
 ---
 
@@ -276,13 +279,18 @@ Remove `import Combine` from features; keep it in services only while migrating.
 
 ### `@ViewStateStore`
 
-Macro on a `struct` with stored `var` properties. Generates `<StructName>Store`:
+Macro on a `struct` with stored `var` properties. Generates a public `<StructName>Store` facade:
 
-- `@Published` property per field
+- iOS 15–16: `ObservableObject` + `@Published` backend
+- iOS 17+: `@Observable` backend
 - `snapshot` — current struct value
 - `apply(_:)` — updates only changed fields
 
 Properties need an explicit type or a default value the macro can infer (`true`/`false` → `Bool`, string literal → `String`).
+
+### `FeatureState`
+
+Property wrapper for features in SwiftUI. Uses `@StateObject` under the hood on iOS 15+.
 
 ### `ViewStateStore`
 
@@ -329,11 +337,18 @@ Protocol implemented by generated stores.
 FeatureKit/
 ├── Package.swift
 ├── Sources/
+│   ├── FeatureKitCore/
+│   │   ├── Withable.swift
+│   │   ├── ViewStateStore.swift
+│   │   ├── ViewStateStoreNotifying.swift
+│   │   ├── FeatureStateSupport.swift
+│   │   ├── FeatureTaskSupport.swift
+│   │   └── BaseFeatureProtocol.swift
 │   ├── FeatureKit/
 │   │   ├── BaseFeature.swift
-│   │   ├── ViewStateStore.swift
+│   │   ├── FeatureState.swift
 │   │   ├── ViewStateStoreMacro.swift
-│   │   └── Withable.swift
+│   │   └── Exports.swift
 │   └── FeatureKitMacros/
 │       ├── Plugin.swift
 │       └── ViewStateStoreMacro.swift

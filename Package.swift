@@ -19,6 +19,12 @@ let package = Package(
         .package(url: "https://github.com/swiftlang/swift-syntax.git", from: "600.0.0"),
     ],
     targets: [
+        .target(
+            name: "FeatureKitCore",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency"),
+            ]
+        ),
         .macro(
             name: "FeatureKitMacros",
             dependencies: [
@@ -28,7 +34,10 @@ let package = Package(
         ),
         .target(
             name: "FeatureKit",
-            dependencies: ["FeatureKitMacros"],
+            dependencies: [
+                "FeatureKitCore",
+                "FeatureKitMacros",
+            ],
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency"),
             ]

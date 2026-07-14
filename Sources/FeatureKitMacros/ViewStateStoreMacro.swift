@@ -14,17 +14,31 @@ public struct ViewStateStoreMacro: PeerMacro {
 
         let structName = structDecl.name.text
         let storeName = "\(structName)Store"
+        let legacyStoreName = "\(storeName)Legacy"
+        let modernStoreName = "\(storeName)Modern"
         let properties = try storedProperties(from: structDecl)
 
         guard !properties.isEmpty else {
             throw MacroError.noStoredProperties
         }
 
-        let publishedProperties = properties.map { property in
+        let accessLevel = structDecl.modifiers.first { modifier in
+            modifier.name.text == "public" || modifier.name.text == "package" || modifier.name.text == "internal"
+        }?.name.text ?? ""
+
+        let accessPrefix = accessLevel.isEmpty ? "" : "\(accessLevel) "
+
+        let legacyPublishedProperties = properties.map { property in
             let defaultValue = property.defaultValue ?? property.defaultLiteral
             return """
                 @Published public var \(property.name): \(property.type) = \(defaultValue)
                 """
+        }
+        .joined(separator: "\n    ")
+
+        let modernProperties = properties.map { property in
+            let defaultValue = property.defaultValue ?? property.defaultLiteral
+            return "public var \(property.name): \(property.type) = \(defaultValue)"
         }
         .joined(separator: "\n    ")
 
@@ -42,17 +56,44 @@ public struct ViewStateStoreMacro: PeerMacro {
             """
             if \(property.name) != state.\(property.name) {
                 \(property.name) = state.\(property.name)
+                didChange = true
             }
             """
         }
         .joined(separator: "\n        ")
 
-        let generated = """
+        let forwardedProperties = properties.map { property in
+            """
+            \(accessPrefix)var \(property.name): \(property.type) {
+                get {
+                    switch backend {
+                    case .legacy(let store):
+                        return store.\(property.name)
+                    case .modern(let store):
+                        return store.\(property.name)
+                    }
+                }
+                set {
+                    switch backend {
+                    case .legacy(let store):
+                        store.\(property.name) = newValue
+                    case .modern(let store):
+                        store.\(property.name) = newValue
+                    }
+                }
+            }
+            """
+        }
+        .joined(separator: "\n\n    ")
+
+        let legacyStore = """
             @MainActor
-            final class \(storeName): ViewStateStore, ObservableObject {
+            fileprivate final class \(legacyStoreName): ViewStateStoreNotifying, ObservableObject {
                 public typealias State = \(structName)
 
-                \(publishedProperties)
+                public var onChange: (() -> Void)?
+
+                \(legacyPublishedProperties)
 
                 public init() {}
 
@@ -65,12 +106,134 @@ public struct ViewStateStoreMacro: PeerMacro {
                 }
 
                 public func apply(_ state: \(structName)) {
+                    var didChange = false
                     \(applyDiffs)
+                    if didChange {
+                        onChange?()
+                    }
                 }
             }
             """
 
-        return [DeclSyntax(stringLiteral: generated)]
+        let modernStore = """
+            @available(iOS 17, macOS 14, *)
+            @MainActor
+            @Observable
+            fileprivate final class \(modernStoreName): ViewStateStoreNotifying {
+                public typealias State = \(structName)
+
+                @ObservationIgnored
+                public var onChange: (() -> Void)?
+
+                \(modernProperties)
+
+                public init() {}
+
+                public init(_ state: \(structName)) {
+                    \(stateInitAssignments)
+                }
+
+                public var snapshot: \(structName) {
+                    \(structName)(\(snapshotArguments))
+                }
+
+                public func apply(_ state: \(structName)) {
+                    var didChange = false
+                    \(applyDiffs)
+                    if didChange {
+                        onChange?()
+                    }
+                }
+            }
+            """
+
+        let backendEnum = """
+            @MainActor
+            fileprivate enum \(storeName)Backend {
+                case legacy(\(legacyStoreName))
+                case modern(\(modernStoreName))
+
+                var snapshot: \(structName) {
+                    switch self {
+                    case .legacy(let store):
+                        return store.snapshot
+                    case .modern(let store):
+                        return store.snapshot
+                    }
+                }
+
+                func apply(_ state: \(structName)) {
+                    switch self {
+                    case .legacy(let store):
+                        store.apply(state)
+                    case .modern(let store):
+                        store.apply(state)
+                    }
+                }
+
+                func setOnChange(_ handler: @escaping () -> Void) {
+                    switch self {
+                    case .legacy(let store):
+                        store.onChange = handler
+                    case .modern(let store):
+                        store.onChange = handler
+                    }
+                }
+            }
+            """
+
+        let facadeStore = """
+            @MainActor
+            \(accessPrefix)final class \(storeName): ViewStateStoreNotifying, ObservableObject {
+                public typealias State = \(structName)
+
+                public var onChange: (() -> Void)?
+
+                private var backend: \(storeName)Backend
+
+                \(forwardedProperties)
+
+                public init() {
+                    if #available(iOS 17, macOS 14, *) {
+                        backend = .modern(\(modernStoreName)())
+                    } else {
+                        backend = .legacy(\(legacyStoreName)())
+                    }
+                    bindBackend()
+                }
+
+                public init(_ state: \(structName)) {
+                    if #available(iOS 17, macOS 14, *) {
+                        backend = .modern(\(modernStoreName)(state))
+                    } else {
+                        backend = .legacy(\(legacyStoreName)(state))
+                    }
+                    bindBackend()
+                }
+
+                public var snapshot: \(structName) {
+                    backend.snapshot
+                }
+
+                public func apply(_ state: \(structName)) {
+                    backend.apply(state)
+                }
+
+                private func bindBackend() {
+                    backend.setOnChange { [weak self] in
+                        self?.objectWillChange.send()
+                        self?.onChange?()
+                    }
+                }
+            }
+            """
+
+        return [
+            DeclSyntax(stringLiteral: legacyStore),
+            DeclSyntax(stringLiteral: modernStore),
+            DeclSyntax(stringLiteral: backendEnum),
+            DeclSyntax(stringLiteral: facadeStore),
+        ]
     }
 
     private static func storedProperties(from structDecl: StructDeclSyntax) throws -> [PropertyInfo] {
