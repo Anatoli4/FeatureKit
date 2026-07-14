@@ -9,178 +9,47 @@ public struct ViewStateStoreMacro: PeerMacro {
         in context: some MacroExpansionContext
     ) throws -> [DeclSyntax] {
         guard let structDecl = declaration.as(StructDeclSyntax.self) else {
-            throw MacroError.notAStruct
+            throw ViewStateStoreMacroError.notAStruct
         }
 
         let structName = structDecl.name.text
         let storeName = "\(structName)Store"
         let legacyStoreName = "\(storeName)Legacy"
         let modernStoreName = "\(storeName)Modern"
-        let properties = try storedProperties(from: structDecl)
+        let modernAdapterName = "\(storeName)ModernAdapter"
+        let backendProtocolName = "\(storeName)Backend"
+        let properties = try ViewStateStoreMacroSupport.storedProperties(from: structDecl)
 
         guard !properties.isEmpty else {
-            throw MacroError.noStoredProperties
+            throw ViewStateStoreMacroError.noStoredProperties
         }
 
-        let accessLevel = structDecl.modifiers.first { modifier in
-            modifier.name.text == "public" || modifier.name.text == "package" || modifier.name.text == "internal"
-        }?.name.text ?? ""
+        let accessPrefix = ViewStateStoreMacroSupport.accessPrefix(for: structDecl)
 
-        let accessPrefix = accessLevel.isEmpty ? "" : "\(accessLevel) "
-
-        let legacyPublishedProperties = properties.map { property in
-            let defaultValue = property.defaultValue ?? property.defaultLiteral
-            return """
-                @Published public var \(property.name): \(property.type) = \(defaultValue)
-                """
+        let backendProtocolRequirements = properties.map { property in
+            "var \(property.name): \(property.type) { get set }"
         }
         .joined(separator: "\n    ")
 
-        let modernProperties = properties.map { property in
-            let defaultValue = property.defaultValue ?? property.defaultLiteral
-            return "public var \(property.name): \(property.type) = \(defaultValue)"
-        }
-        .joined(separator: "\n    ")
-
-        let stateInitAssignments = properties.map { property in
-            "self.\(property.name) = state.\(property.name)"
-        }
-        .joined(separator: "\n        ")
-
-        let snapshotArguments = properties.map { property in
-            "\(property.name): \(property.name)"
-        }
-        .joined(separator: ", ")
-
-        let applyDiffs = properties.map { property in
-            """
-            if \(property.name) != state.\(property.name) {
-                \(property.name) = state.\(property.name)
-                didChange = true
+        let backendProtocol = """
+            @MainActor
+            fileprivate protocol \(backendProtocolName): AnyObject {
+                var onChange: (() -> Void)? { get set }
+                var snapshot: \(structName) { get }
+                func apply(_ state: \(structName))
+                \(backendProtocolRequirements)
             }
             """
-        }
-        .joined(separator: "\n        ")
 
-        let forwardedProperties = properties.map { property in
+        let facadeForwardedProperties = properties.map { property in
             """
             \(accessPrefix)var \(property.name): \(property.type) {
-                get {
-                    switch backend {
-                    case .legacy(let store):
-                        return store.\(property.name)
-                    case .modern(let store):
-                        return store.\(property.name)
-                    }
-                }
-                set {
-                    switch backend {
-                    case .legacy(let store):
-                        store.\(property.name) = newValue
-                    case .modern(let store):
-                        store.\(property.name) = newValue
-                    }
-                }
+                get { backend.\(property.name) }
+                set { backend.\(property.name) = newValue }
             }
             """
         }
         .joined(separator: "\n\n    ")
-
-        let legacyStore = """
-            @MainActor
-            fileprivate final class \(legacyStoreName): ViewStateStoreNotifying, ObservableObject {
-                public typealias State = \(structName)
-
-                public var onChange: (() -> Void)?
-
-                \(legacyPublishedProperties)
-
-                public init() {}
-
-                public init(_ state: \(structName)) {
-                    \(stateInitAssignments)
-                }
-
-                public var snapshot: \(structName) {
-                    \(structName)(\(snapshotArguments))
-                }
-
-                public func apply(_ state: \(structName)) {
-                    var didChange = false
-                    \(applyDiffs)
-                    if didChange {
-                        onChange?()
-                    }
-                }
-            }
-            """
-
-        let modernStore = """
-            @available(iOS 17, macOS 14, *)
-            @MainActor
-            @Observable
-            fileprivate final class \(modernStoreName): ViewStateStoreNotifying {
-                public typealias State = \(structName)
-
-                @ObservationIgnored
-                public var onChange: (() -> Void)?
-
-                \(modernProperties)
-
-                public init() {}
-
-                public init(_ state: \(structName)) {
-                    \(stateInitAssignments)
-                }
-
-                public var snapshot: \(structName) {
-                    \(structName)(\(snapshotArguments))
-                }
-
-                public func apply(_ state: \(structName)) {
-                    var didChange = false
-                    \(applyDiffs)
-                    if didChange {
-                        onChange?()
-                    }
-                }
-            }
-            """
-
-        let backendEnum = """
-            @MainActor
-            fileprivate enum \(storeName)Backend {
-                case legacy(\(legacyStoreName))
-                case modern(\(modernStoreName))
-
-                var snapshot: \(structName) {
-                    switch self {
-                    case .legacy(let store):
-                        return store.snapshot
-                    case .modern(let store):
-                        return store.snapshot
-                    }
-                }
-
-                func apply(_ state: \(structName)) {
-                    switch self {
-                    case .legacy(let store):
-                        store.apply(state)
-                    case .modern(let store):
-                        store.apply(state)
-                    }
-                }
-
-                func setOnChange(_ handler: @escaping () -> Void) {
-                    switch self {
-                    case .legacy(let store):
-                        store.onChange = handler
-                    case .modern(let store):
-                        store.onChange = handler
-                    }
-                }
-            }
-            """
 
         let facadeStore = """
             @MainActor
@@ -189,24 +58,24 @@ public struct ViewStateStoreMacro: PeerMacro {
 
                 public var onChange: (() -> Void)?
 
-                private var backend: \(storeName)Backend
+                private let backend: any \(backendProtocolName)
 
-                \(forwardedProperties)
+                \(facadeForwardedProperties)
 
                 public init() {
                     if #available(iOS 17, macOS 14, *) {
-                        backend = .modern(\(modernStoreName)())
+                        backend = \(modernAdapterName)(store: \(modernStoreName)())
                     } else {
-                        backend = .legacy(\(legacyStoreName)())
+                        backend = \(legacyStoreName)()
                     }
                     bindBackend()
                 }
 
                 public init(_ state: \(structName)) {
                     if #available(iOS 17, macOS 14, *) {
-                        backend = .modern(\(modernStoreName)(state))
+                        backend = \(modernAdapterName)(store: \(modernStoreName)(state))
                     } else {
-                        backend = .legacy(\(legacyStoreName)(state))
+                        backend = \(legacyStoreName)(state)
                     }
                     bindBackend()
                 }
@@ -220,7 +89,7 @@ public struct ViewStateStoreMacro: PeerMacro {
                 }
 
                 private func bindBackend() {
-                    backend.setOnChange { [weak self] in
+                    backend.onChange = { [weak self] in
                         self?.objectWillChange.send()
                         self?.onChange?()
                     }
@@ -228,112 +97,27 @@ public struct ViewStateStoreMacro: PeerMacro {
             }
             """
 
+        let legacyStore = ViewStateStoreLegacyGenerator.make(
+            structName: structName,
+            storeName: storeName,
+            legacyStoreName: legacyStoreName,
+            backendProtocolName: backendProtocolName,
+            properties: properties
+        )
+
+        let modernPeers = ViewStateStoreModernGenerator.make(
+            structName: structName,
+            modernStoreName: modernStoreName,
+            modernAdapterName: modernAdapterName,
+            backendProtocolName: backendProtocolName,
+            properties: properties
+        )
+
         return [
+            DeclSyntax(stringLiteral: backendProtocol),
             DeclSyntax(stringLiteral: legacyStore),
-            DeclSyntax(stringLiteral: modernStore),
-            DeclSyntax(stringLiteral: backendEnum),
+            DeclSyntax(stringLiteral: modernPeers),
             DeclSyntax(stringLiteral: facadeStore),
         ]
-    }
-
-    private static func storedProperties(from structDecl: StructDeclSyntax) throws -> [PropertyInfo] {
-        var properties: [PropertyInfo] = []
-
-        for member in structDecl.memberBlock.members {
-            guard let variable = member.decl.as(VariableDeclSyntax.self) else { continue }
-            guard variable.bindingSpecifier.tokenKind == .keyword(.var) else { continue }
-            guard !variable.modifiers.contains(where: { $0.name.tokenKind == .keyword(.static) }) else { continue }
-
-            for binding in variable.bindings {
-                guard binding.accessorBlock == nil else { continue }
-                guard let identifier = binding.pattern.as(IdentifierPatternSyntax.self) else { continue }
-
-                let name = identifier.identifier.text
-                let typeAnnotation = binding.typeAnnotation?.type.trimmedDescription
-                let defaultValue = binding.initializer?.value.trimmedDescription
-
-                guard let type = typeAnnotation ?? inferredType(from: defaultValue) else {
-                    throw MacroError.missingTypeAnnotation(identifier: name)
-                }
-
-                properties.append(
-                    PropertyInfo(
-                        name: name,
-                        type: type,
-                        defaultValue: defaultValue
-                    )
-                )
-            }
-        }
-
-        return properties
-    }
-
-    private static func inferredType(from defaultValue: String?) -> String? {
-        guard let defaultValue else { return nil }
-
-        switch defaultValue {
-        case "true", "false":
-            return "Bool"
-        case "nil":
-            return nil
-        case let value where value.hasPrefix("\""):
-            return "String"
-        case let value where Int(value) != nil:
-            return "Int"
-        case let value where Double(value) != nil:
-            return "Double"
-        default:
-            return nil
-        }
-    }
-}
-
-private struct PropertyInfo {
-    let name: String
-    let type: String
-    let defaultValue: String?
-
-    var defaultLiteral: String {
-        if let defaultValue {
-            return defaultValue
-        }
-
-        if type.hasSuffix("?") {
-            return "nil"
-        }
-
-        if type == "Bool" {
-            return "false"
-        }
-
-        if type == "String" {
-            return "\"\""
-        }
-
-        return "\(type)()"
-    }
-}
-
-private enum MacroError: Error, CustomStringConvertible {
-    case notAStruct
-    case noStoredProperties
-    case missingTypeAnnotation(identifier: String)
-
-    var description: String {
-        switch self {
-        case .notAStruct:
-            return "@ViewStateStore can only be applied to a struct."
-        case .noStoredProperties:
-            return "@ViewStateStore requires at least one stored `var` property."
-        case .missingTypeAnnotation(let identifier):
-            return "@ViewStateStore property `\(identifier)` needs an explicit type or a default value that can be inferred."
-        }
-    }
-}
-
-private extension SyntaxProtocol {
-    var trimmedDescription: String {
-        trimmed.description
     }
 }

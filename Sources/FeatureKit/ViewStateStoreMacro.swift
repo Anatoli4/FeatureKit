@@ -11,5 +11,5 @@
 /// }
 /// // expands to `SplashViewStateStore`
 /// ```
-@attached(peer, names: suffixed(Store), suffixed(StoreLegacy), suffixed(StoreModern), suffixed(StoreBackend))
+@attached(peer, names: suffixed(Store), suffixed(StoreLegacy), suffixed(StoreModern), suffixed(StoreModernAdapter), suffixed(StoreBackend))
 public macro ViewStateStore() = #externalMacro(module: "FeatureKitMacros", type: "ViewStateStoreMacro")
