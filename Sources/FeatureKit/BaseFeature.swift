@@ -2,14 +2,17 @@ import Combine
 import Foundation
 
 @preconcurrency @MainActor
-open class BaseFeature<ViewStateType: ViewState, Action>: ObservableObject {
-    @Published
-    public private(set) var viewState: ViewStateType
+open class BaseFeature<Store: ViewStateStore, Action>: ObservableObject {
+    public let viewState: Store
 
     private var observationTasks: [UUID: Task<Void, Never>] = [:]
+    private var storeObservation: AnyCancellable?
 
-    public init(viewState: ViewStateType) {
+    public init(viewState: Store) {
         self.viewState = viewState
+        storeObservation = viewState.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
     }
 
     deinit {
@@ -17,10 +20,12 @@ open class BaseFeature<ViewStateType: ViewState, Action>: ObservableObject {
     }
 
     public func send(with action: Action) {
-        viewState = reduceState(with: action)
+        let next = reduceState(with: action)
+        guard next != viewState.snapshot else { return }
+        viewState.apply(next)
     }
 
-    open func reduceState(with action: Action) -> ViewStateType {
+    open func reduceState(with action: Action) -> Store.State {
         fatalError("reduceState(with:) must be overridden in \(String(describing: Self.self))")
     }
 

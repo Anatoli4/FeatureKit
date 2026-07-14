@@ -1,6 +1,7 @@
 // swift-tools-version: 6.0
 
 import PackageDescription
+import CompilerPluginSupport
 
 let package = Package(
     name: "FeatureKit",
@@ -14,12 +15,27 @@ let package = Package(
             targets: ["FeatureKit"]
         ),
     ],
+    dependencies: [
+        .package(url: "https://github.com/swiftlang/swift-syntax.git", from: "600.0.0"),
+    ],
     targets: [
+        .macro(
+            name: "FeatureKitMacros",
+            dependencies: [
+                .product(name: "SwiftSyntaxMacros", package: "swift-syntax"),
+                .product(name: "SwiftCompilerPlugin", package: "swift-syntax"),
+            ]
+        ),
         .target(
             name: "FeatureKit",
+            dependencies: ["FeatureKitMacros"],
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency"),
             ]
+        ),
+        .testTarget(
+            name: "FeatureKitTests",
+            dependencies: ["FeatureKit"]
         ),
     ]
 )
